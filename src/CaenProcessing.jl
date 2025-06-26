@@ -5,14 +5,6 @@ using AstroParticleUnits
 using TypedTables
 using StructArrays
 using StatsBase
-# using Printf: @sprintf 
-
-using FHist
-using Distributions
-using UnitfulDistributions
-using LandauDistribution
-
-using Minuit2
 
 const ns = u"ns"
 const mV = u"mV"
