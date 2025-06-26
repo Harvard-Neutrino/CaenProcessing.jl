@@ -1,0 +1,23 @@
+name = "CaenProcessing"
+uuid = "7e9d5953-169b-4535-8b62-5626c83d9d85"
+authors = ["kcarloni <kcarloni@g.harvard.edu>", "thomwg11 <thomwg11@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+AstroParticleUnits = "7ef70e66-125c-4f32-8552-6b4d78ac8c93"
+DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+FHist = "68837c9b-b678-4cd5-9925-8a54edc8f695"
+LandauDistribution = "6012e1b8-0df6-47e7-96ae-5acef29e6d22"
+Minuit2 = "37821647-3276-4ed8-9a4e-bc9886b3c106"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
+TypedTables = "9d95f2ec-7b3d-5a63-8d20-e2491e220bb9"
+UnitfulDistributions = "0f7e2b2a-29fa-49f7-8192-6450bd768ba8"
+
+[compat]
+FHist = "0.11.11"
+
+[sources]
+AstroParticleUnits = {url = "https://github.com/kcarloni/AstroParticleUnits.jl.git"}
+UnitfulDistributions = {url = "https://github.com/kcarloni/UnitfulDistributions.jl.git"}
