@@ -203,7 +203,7 @@ function process_waveform( waveform; CFD_threshold=0.2 )
 
         # calculate charge integral of the pulse
         # NB: could choose a more intelligent pulse start
-        x_min, x_max = 120, n_samples
+        x_min, x_max = 120, length(waveform)
         charge_integral = sum( waveform[x_min:x_max] )
 
         # calculate pre-pulse integral
