@@ -5,7 +5,7 @@ const time_per_sample = 2u"ns"
 const time_per_clock_cycle = 8ns #125 mHz clock cycle
 const R_load = 50u"Ω" # load resistor
 
-const n_samples = 1000
+#const n_samples = 1000
 const header_size = 6 
 
 const T_HEADER = UInt32
@@ -18,10 +18,23 @@ we can pre_calc the number of events
 
 NB: could add a check for divisibility? = check on whether file data is somehow non-standard
 """
-calc_n_evts( fname ) = filesize( fname ) ÷ ( 
+calc_n_evts( fname, n_samples ) = filesize( fname ) ÷ ( 
     header_size * sizeof(T_HEADER) + n_samples * sizeof(T_DATA) )
 
 # ====================================================
+
+"""
+    get_n_event_samples( fname )
+Get the number of samples for every event in the file.
+Since all events have the same number of samples,
+just need to read the header of the first event
+"""
+function get_n_event_samples( fname )
+    open( fname, "r" ) do io
+        header = [ read(io, UInt32) for i in 1:6 ]
+        return ( header[1] - 24 ) ÷ 2
+    end
+end
 
 """
     read_next_trigger!( io, waveform, event_id  )
@@ -71,12 +84,12 @@ function read_next_trigger!( io, waveform::AbstractArray{Int16},
 end
 
 """
-    instantiate_data_vecs()
+    instantiate_data_vecs( n_samples )
 
 Instantiate vectors for waveforms, event_id, trigger_time, etc. 
 to be modified in `read_next_trigger!`. 
 """
-function instantiate_data_vecs()
+function instantiate_data_vecs( n_samples )
 
     w = Vector{T_DATA}(undef, n_samples)
     event_id = Vector{T_HEADER}( undef, 1 ) 
@@ -89,13 +102,15 @@ end
 """
     read_waveforms( f_dat; n_evts=Inf )
 """
-function read_waveforms( f_dat; n_evts=Inf )
+function read_waveforms( f_dat, n_evts=Inf )
 
-    n_evts = ( isinf(n_evts) ) ? calc_n_evts(f_dat) : n_evts 
+    n_samples = get_n_event_samples( f_dat )
+
+    n_evts = ( isinf(n_evts) ) ? calc_n_evts(f_dat, n_samples) : n_evts 
     waveform_array = Matrix{T_DATA}(undef, n_samples, n_evts )
 
     # instantiate for while loop
-    event_id, trigger_time, num_overflows = instantiate_data_vecs()[2:end]
+    event_id, trigger_time, num_overflows = instantiate_data_vecs( n_samples )[2:end]
 
     open( f_dat, "r" ) do io     
     # read + process data evt-by-evt from file   
@@ -220,11 +235,12 @@ Read a .dat file named `f_dat` from the Caen digitizer to a Table object.
 """
 function process_data( f_dat; n_evts=Inf )
 
-    n_evts = convert( Int, min( n_evts, calc_n_evts(f_dat) ) )
+    n_samples = get_n_event_samples( f_dat )
+    n_evts = convert( Int, min( n_evts, calc_n_evts(f_dat, n_samples) ) )
 
     # instantiate for while loop
     waveform =  Vector{float(T_DATA)}(undef, n_samples)
-    w, event_id, trigger_time, num_overflows = instantiate_data_vecs()
+    w, event_id, trigger_time, num_overflows = instantiate_data_vecs( n_samples )
 
     # properties to save 
     blank_col(T::Type) = Vector{T}(undef, n_evts)
@@ -275,4 +291,3 @@ function process_data( f_dat; n_evts=Inf )
 
     return t
 end
-
