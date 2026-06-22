@@ -1,9 +1,9 @@
 
 # properties of digitizer setup
-const volts_per_ADC = 2u"V" / 2^14
-const time_per_sample = 2u"ns"
-const time_per_clock_cycle = 8ns #125 mHz clock cycle
-const R_load = 50u"Ω" # load resistor
+const VOLTS_PER_ADC = 2u"V" / 2^14
+const TIME_PER_SAMPLE = 2u"ns"
+const TIME_PER_CLOCK_CYCLE = 8ns #125 mHz clock cycle
+const R_LOAD = 50u"Ω" # load resistor
 
 #const n_samples = 1000
 const header_size = 6 
@@ -214,16 +214,28 @@ function process_waveform( waveform; CFD_threshold=0.2 )
         # compute charge-weighted mean time of pulses
     
     return (
-        is_saturated = is_saturated, 
+        is_saturated = is_saturated,
 
-        baseline = baseline * volts_per_ADC,
-        baseline_rms = baseline_rms * volts_per_ADC,
+        # physical-unit values, with their ADC-unit counterparts (the `_ADC`
+        # columns) saved alongside for convenience; the invariant
+        # `physical == x_ADC * VOLTS_PER_ADC` holds for each such pair.
+        # `peak_ADC` is deliberately separate: it is the literal ADC reading at
+        # the peak with the pedestal NOT subtracted, so (unlike waveform_max) it
+        # is not just waveform_max expressed in ADC units.
+        baseline = baseline * VOLTS_PER_ADC,
+        baseline_ADC = baseline,
+        baseline_rms = baseline_rms * VOLTS_PER_ADC,
+        baseline_rms_ADC = baseline_rms,
 
-        waveform_max = max_w * volts_per_ADC,
-        waveform_max_time = max_t * time_per_sample,
+        waveform_max = max_w * VOLTS_PER_ADC,
+        peak_ADC = max_w + baseline,
+        waveform_max_time = max_t * TIME_PER_SAMPLE,
+        # waveform_max_time_raw = max_t,
 
-        event_time_CFD = event_time * time_per_sample,
-        charge_integral = charge_integral * volts_per_ADC / R_load * time_per_sample,
+        event_time_CFD = event_time * TIME_PER_SAMPLE,
+        # event_time_CFD_raw = event_time,
+        
+        charge_integral = charge_integral * VOLTS_PER_ADC / R_LOAD * TIME_PER_SAMPLE,
     )
 end
 
@@ -246,15 +258,24 @@ function process_data( f_dat; n_evts=Inf )
     blank_col(T::Type) = Vector{T}(undef, n_evts)
     blank_col(T::Quantity) = StructArray{T}( undef, n_evts )
     blank_col(T::Type, u::FreeUnits ) = blank_col( typeof(one(T) * u) )
-    t = Table(
+    t = StructArray(
         event_id = blank_col( Int32 ),
         trigger_time = blank_col( Float64, s ),
         is_saturated = blank_col( Bool ),
+        
         baseline = blank_col( Float64, mV ),
+        baseline_ADC = blank_col( Float64 ),
         baseline_rms = blank_col( Float64, mV ),
+        baseline_rms_ADC = blank_col( Float64 ),
+
         waveform_max_time = blank_col( Int32, ns ),
+        # waveform_max_time_raw = blank_col( Int32 ),
         waveform_max = blank_col( Float64, mV ),
+        peak_ADC = blank_col( Float64 ),
+        
         event_time_CFD = blank_col( Int32, ns ),
+        # event_time_CFD_raw = blank_col( Int32 ),
+
         charge_integral = blank_col( Float64, C),
     )
 
@@ -274,16 +295,21 @@ function process_data( f_dat; n_evts=Inf )
             # copy to table
             begin
                 t.event_id[i] = event_id[1]
-                t.trigger_time[i] = trigger_time[1] * time_per_clock_cycle
+                t.trigger_time[i] = trigger_time[1] * TIME_PER_CLOCK_CYCLE
 
                 t.is_saturated[i] = calcs.is_saturated
                 t.baseline[i] = calcs.baseline
+                t.baseline_ADC[i] = calcs.baseline_ADC
                 t.baseline_rms[i] = calcs.baseline_rms
+                t.baseline_rms_ADC[i] = calcs.baseline_rms_ADC
 
                 t.waveform_max[i] = calcs.waveform_max
+                t.peak_ADC[i] = calcs.peak_ADC
                 t.waveform_max_time[i] = calcs.waveform_max_time
+                # t.waveform_max_time_raw[i] = calcs.waveform_max_time_raw
 
                 t.event_time_CFD[i]    = calcs.event_time_CFD
+                # t.event_time_CFD_raw[i] = calcs.event_time_CFD_raw
                 t.charge_integral[i] = calcs.charge_integral
             end
         end

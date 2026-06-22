@@ -2,8 +2,7 @@
 module CaenProcessing
 
 using AstroParticleUnits
-using TypedTables
-using StructArrays
+using StructArrayTables
 using StatsBase
 
 const ns = u"ns"
@@ -12,10 +11,12 @@ const C = u"C"
 const pC = u"pC"
 
 include("read_and_process.jl")
+include("runs.jl")
 
 export ns, mV, C, pC
 export read_waveforms, process_data
+export read_run, read_run_config, Run
 
-export volts_per_ADC, time_per_sample
+export VOLTS_PER_ADC, TIME_PER_SAMPLE
 
 end
