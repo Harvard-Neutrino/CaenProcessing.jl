@@ -56,7 +56,7 @@ function read_next_trigger!( io, waveform::AbstractArray{Int16},
         trigger_time_tag = header[6]
         # problem: the digitizer saves "trigger_time_tag" as UInt32, which will overflow w/o warning.
         # to solve this, check if the time since prev. trigger is of the same order of mag. as typemax( Int32 ) ≃ 2e9
-        t = convert(Float32, trigger_time_tag) + num_overflows[1] * typemax(Int32)
+        t = convert(Float64, trigger_time_tag) + num_overflows[1] * typemax(Int32)
         # and then increment
         if ( trigger_time[1] - t ) > 2e9
             num_overflows[1] += 1
@@ -92,8 +92,8 @@ to be modified in `read_next_trigger!`.
 function instantiate_data_vecs( n_samples )
 
     w = Vector{T_DATA}(undef, n_samples)
-    event_id = Vector{T_HEADER}( undef, 1 ) 
-    trigger_time = Vector{float(T_HEADER)}( undef, 1 )
+    event_id = Vector{T_HEADER}( undef, 1 )
+    trigger_time = Vector{Float64}( undef, 1 )
     num_overflows = [0]
 
     return w, event_id, trigger_time, num_overflows
@@ -163,56 +163,63 @@ begin
 
 end
 
-# process a single waveform
-function process_waveform( waveform; CFD_threshold=0.2 )
+"""
+    process_waveform( waveform; kwargs... )
 
-    # ...
+Compute per-event summary quantities from a single `waveform`.
 
-        is_saturated = check_saturation( waveform )
+The baseline and charge-integral windows are anchored to the detected pulse
+*onset*, so they adapt to pulses arriving anywhere in the record. All parameters
+are keyword arguments with defaults, so no run configuration is required.
 
-        # calc baseline
-        baseline_width = 80 # samples
-        baseline_xmin = 1
-        baseline_xmax = baseline_xmin + baseline_width
-        baseline = calc_baseline( 
-            waveform,
-            baseline_xmin,
-            baseline_xmax
-        )
+Keyword arguments (lengths in samples):
+- `cfd_fraction` : onset is the last pre-peak sample below this fraction of the peak height
+- `skip_initial` : leave the first this-many samples out of the baseline window
+- `base_guard`   : gap between the baseline window and the onset
+- `base_width`   : width of the pre-pulse baseline window
+- `charge_pre`   : begin the charge integral this many samples before the onset
+- `charge_len`   : length of the charge-integral window
+- `polarity`     : `"POSITIVE"` or `"NEGATIVE"` pulse direction
+"""
+function process_waveform( waveform;
+        cfd_fraction=0.2, skip_initial=16, base_guard=8, base_width=40,
+        charge_pre=8, charge_len=180, polarity="POSITIVE" )
 
-        # subtract baseline
-        waveform .-= baseline
+    n = length( waveform )
+    sgn = startswith( uppercase(string(polarity)), "POS" ) ? 1.0 : -1.0
+    is_saturated = check_saturation( waveform )
 
-        # calc baseline rms 
-        baseline_rms = calc_baseline_rms( 
-            waveform, 
-            baseline_xmin, 
-            baseline_xmax
-        )
+    s = sgn .* waveform                       # positive-going pulse
 
-        
-        # find max val
-        k = argmax( waveform )
-        max_t = (k-1)
-        max_w = waveform[k]
+    # locate the pulse using a provisional whole-trace median pedestal
+    prov = median( s )
+    k = argmax( s )                           # peak sample
+    peak = s[k] - prov
 
-        # compute pulse start time
-        k_start = calc_CFD_sample_index( 
-            waveform, CFD_threshold )
-        event_time = (k_start - 1)
+    # pulse onset: last pre-peak sample below `cfd_fraction` of the peak height.
+    # `onset = firstindex(s) - 1` is the sentinel for "no crossing found".
+    onset = firstindex(s) - 1
+    for i in k:-1:firstindex(s)
+        if ( s[i] - prov ) < cfd_fraction * peak
+            onset = i
+            break
+        end
+    end
 
-        # calculate charge integral of the pulse
-        # NB: could choose a more intelligent pulse start
-        x_min, x_max = 120, length(waveform)
-        charge_integral = sum( waveform[x_min:x_max] )
+    # baseline: mean over a `base_width`-sample window placed `base_guard`
+    # samples before the onset, kept clear of the first `skip_initial` samples
+    bstop = clamp( onset - base_guard - 1, skip_initial + base_width, n )
+    bwin  = (bstop - base_width + 1):bstop
+    baseline = mean( @view s[bwin] )
+    baseline_rms = std( @view s[bwin]; corrected=false, mean=baseline )
 
-        # calculate pre-pulse integral
-        
-        # compute pulse shape discrimination (PSD)
-        # method 1. = choose short "fast" time window 
+    # baseline-subtracted pulse height
+    max_w = s[k] - baseline
 
-        # compute charge-weighted mean time of pulses
-    
+    # charge integral over a window bracketing the pulse
+    cwin = clamp( onset - charge_pre, firstindex(s), n ):clamp( onset + charge_len - 1, firstindex(s), n )
+    charge_integral = sum( @view s[cwin] ) - baseline * length(cwin)
+
     return (
         is_saturated = is_saturated,
 
@@ -222,19 +229,17 @@ function process_waveform( waveform; CFD_threshold=0.2 )
         # `peak_ADC` is deliberately separate: it is the literal ADC reading at
         # the peak with the pedestal NOT subtracted, so (unlike waveform_max) it
         # is not just waveform_max expressed in ADC units.
-        baseline = baseline * VOLTS_PER_ADC,
-        baseline_ADC = baseline,
+        baseline = sgn * baseline * VOLTS_PER_ADC,
+        baseline_ADC = sgn * baseline,
         baseline_rms = baseline_rms * VOLTS_PER_ADC,
         baseline_rms_ADC = baseline_rms,
 
         waveform_max = max_w * VOLTS_PER_ADC,
-        peak_ADC = max_w + baseline,
-        waveform_max_time = max_t * TIME_PER_SAMPLE,
-        # waveform_max_time_raw = max_t,
+        peak_ADC = sgn * ( max_w + baseline ),
+        waveform_max_time = ( k - firstindex(s) ) * TIME_PER_SAMPLE,
 
-        event_time_CFD = event_time * TIME_PER_SAMPLE,
-        # event_time_CFD_raw = event_time,
-        
+        event_time_CFD = ( onset - firstindex(s) ) * TIME_PER_SAMPLE,
+
         charge_integral = charge_integral * VOLTS_PER_ADC / R_LOAD * TIME_PER_SAMPLE,
     )
 end
@@ -245,7 +250,7 @@ end
 
 Read a .dat file named `f_dat` from the Caen digitizer to a Table object.
 """
-function process_data( f_dat; n_evts=Inf )
+function process_data( f_dat; n_evts=Inf, kwargs... )
 
     n_samples = get_n_event_samples( f_dat )
     n_evts = convert( Int, min( n_evts, calc_n_evts(f_dat, n_samples) ) )
@@ -276,7 +281,7 @@ function process_data( f_dat; n_evts=Inf )
         event_time_CFD = blank_col( Int32, ns ),
         # event_time_CFD_raw = blank_col( Int32 ),
 
-        charge_integral = blank_col( Float64, C),
+        charge_integral = blank_col( Float64, pC),
     )
 
     open( f_dat, "r" ) do io     
@@ -290,7 +295,7 @@ function process_data( f_dat; n_evts=Inf )
             waveform .= w 
 
             # calculations
-            calcs = process_waveform( waveform )
+            calcs = process_waveform( waveform; kwargs... )
 
             # copy to table
             begin

@@ -140,7 +140,7 @@ each channel number to the table returned by [`process_data`](@ref).
 The data files are taken from `config.files.data` when present, and otherwise
 discovered by globbing `run.dat-ch*` in `dir`.
 """
-function read_run( dir; n_evts=Inf )
+function read_run( dir; n_evts=Inf, kwargs... )
     config = read_run_config( dir )
 
     # prefer the authoritative file list in run.toml; fall back to globbing.
@@ -151,7 +151,7 @@ function read_run( dir; n_evts=Inf )
         m = match( _CH_FILE_REGEX, fname )
         m === nothing && continue
         ch = parse( Int, m.captures[1] )
-        data[ch] = process_data( joinpath(dir, fname); n_evts=n_evts )
+        data[ch] = process_data( joinpath(dir, fname); n_evts=n_evts, kwargs... )
     end
 
     return Run( config, data )

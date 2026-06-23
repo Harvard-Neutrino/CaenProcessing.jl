@@ -33,25 +33,22 @@ run[0]                # channel 0's table  (shorthand for run.data[0])
 
 `n_evts` caps how many events are read (default: all).
 
-## The event table
+## The processed event table
 
-`process_data` returns a `StructArray` (from
-[StructArrayTables.jl](https://github.com/kcarloni/StructArrayTables.jl)); access
-a column with `t.colname`. Physical-unit columns carry
-[AstroParticleUnits](https://github.com/kcarloni/AstroParticleUnits.jl) units.
+`process_data` returns a table (one row per event) of high-level summary quantities, some with physical units, as described below:
 
-| Column | Unit | Description |
-|---|---|---|
-| `event_id` | — | digitizer event counter |
-| `trigger_time` | s | trigger timestamp (overflow-corrected) |
-| `is_saturated` | — | `true` if any sample hit the ADC rail |
-| `baseline` / `baseline_ADC` | mV / ADC | pre-pulse pedestal level |
-| `baseline_rms` / `baseline_rms_ADC` | mV / ADC | noise RMS over the baseline window |
-| `waveform_max` | mV | **baseline-subtracted** pulse height |
-| `peak_ADC` | ADC | **absolute** ADC reading at the peak (pedestal *not* subtracted) |
-| `waveform_max_time` | ns | time of the peak sample |
-| `event_time_CFD` | ns | pulse-start time (constant-fraction discriminator) |
-| `charge_integral` | C | integrated charge over the pulse window |
+| Column | Unit | Description | Source |
+|---|---|---|---|
+| `event_id` | — | digitizer event counter | from header |
+| `trigger_time` | s | trigger timestamp (overflow-corrected) | from header |
+| `is_saturated` | — | `true` if any sample hit the ADC rail | from raw |
+| `baseline` / `baseline_ADC` | mV / ADC | pre-pulse pedestal level | from processing |
+| `baseline_rms` / `baseline_rms_ADC` | mV / ADC | noise RMS over the baseline window | from processing |
+| `waveform_max` | mV | **baseline-subtracted** pulse height | from processing |
+| `peak_ADC` | ADC | **absolute** ADC reading at the peak (pedestal *not* subtracted) | from raw |
+| `waveform_max_time` | ns | time of the peak sample | from raw |
+| `event_time_CFD` | ns | pulse-start time (constant-fraction discriminator) | from processing |
+| `charge_integral` | pC | integrated charge over the pulse window | from processing |
 
 **Raw vs. physical.** For convenience some amplitude quantities are provided in both
 physical units and raw ADC counts. The `_ADC` columns are exactly the
@@ -66,18 +63,46 @@ holds for every `_ADC` pair (e.g. `baseline == baseline_ADC * VOLTS_PER_ADC`).
 at the peak with the pedestal left in, so unlike `waveform_max` it is **not** just
 the pulse height in ADC units. It's handy for saturation / DC-offset checks.
 
-## The `Run` object
+### Processing details:
 
-`read_run` returns a `Run` wrapping the run's metadata and per-channel data:
+Most of the quantities above come straight from the data's header or the raw samples, but some quantities (in particular `waveform_max` and `charge_integral`) depend on the waveform's baseline, which itself requires first determining the onset of the pulse. 
 
-| Access | Meaning |
-|---|---|
-| `run.config` | parsed `run.toml` (`run.config.bias.voltage_V`, `run.config.channels[ch]`, …) |
-| `run.data` | `Dict{Int, table}` — channel number → event table |
-| `run[ch]` | shorthand for `run.data[ch]` |
-| `keys(run)`, `haskey(run, ch)` | the available channel numbers |
+The pulse onset and the baseline/charge windows are found event-by-event *from the waveform itself*, as follows:
 
-It prints a compact summary:
+1. **Onset** — reported as `event_time_CFD`. A provisional pedestal (the median
+   of the whole trace) is subtracted to estimate the peak height; the onset is
+   the last pre-peak sample below `cfd_fraction` of that height (a
+   constant-fraction discriminator).
+2. **Baseline** — sets `baseline` / `baseline_ADC`, `baseline_rms` /
+   `baseline_rms_ADC`, and hence `waveform_max` (the baseline-subtracted peak
+   height). The pedestal is the mean over a `base_width`-sample window ending
+   `base_guard` samples before the onset, kept clear of the first `skip_initial`
+   samples (which can carry a digitizer settling transient); `baseline_rms` is
+   the noise RMS over that same window.
+3. **Charge** — sets `charge_integral`: the baseline-subtracted samples summed
+   from `charge_pre` samples before the onset to `charge_len` samples after it.
+
+The window sizes (in samples) are keyword arguments of the data loading functions, with the following defaults:
+
+| Keyword | Default | Meaning |
+|---|---|---|
+| `cfd_fraction` | 0.2 | onset threshold, as a fraction of the peak height |
+| `skip_initial` | 16 | samples excluded at the start of the record |
+| `base_guard` | 8 | gap between the baseline window and the onset |
+| `base_width` | 40 | width of the baseline window |
+| `charge_pre` | 8 | charge integral starts this many samples before the onset |
+| `charge_len` | 180 | length of the charge-integral window |
+
+Pass overrides if needed, e.g:
+
+```julia
+process_data("run.dat-ch0"; charge_len=220)     # one channel
+read_run("path/to/run_dir"; charge_len=220)     # every channel in the run
+```
+
+## `read_run` and the `Run` object:
+
+For data taken using the `caen-run` script from `caen-daq` (https://github.com/kcarloni/caen-daq), the `read_run` convenience function can be used to package together the processed data with its metadata:
 
 ```
 Run "bias31V_5min"  (20260622T175105)
@@ -90,28 +115,19 @@ Run "bias31V_5min"  (20260622T175105)
      ch1 → 467552 events
 ```
 
-Per-channel trigger thresholds come from the config (`run.config.channels[ch]`),
-not the data — `run.data` holds only the recorded waveforms.
+The `Run` object has the following properties and accessors:
 
-### `caen-run` directory layout
+| Access | Meaning |
+|---|---|
+| `run.config` | parsed `run.toml` (`run.config.bias.voltage_V`, `run.config.channels[ch]`, …) |
+| `run.data` | `Dict{Int, table}` — channel number → event table |
+| `run[ch]` | shorthand for `run.data[ch]` |
+| `keys(run)`, `haskey(run, ch)` | the available channel numbers |
 
-`read_run` expects a directory produced by the `caen-run` script (https://github.com/kcarloni/caen-daq):
-
-```
-run_dir/
-    run.toml        # metadata: label, bias, acquisition, per-channel config
-    used.cfg        # exact wavedump config snapshot
-    run.dat-ch0     # one binary data file per active channel
-    run.dat-ch1
-```
-
-The channel files are taken from `run.toml`'s `[files].data` list when present,
-otherwise discovered by globbing `run.dat-ch*`.
 
 ## Digitizer constants
 
-Setup constants live in `read_and_process.jl`; `VOLTS_PER_ADC` and
-`TIME_PER_SAMPLE` are exported:
+CaenProcessing.jl relies on some fixed properties of the Caen digitizer: 
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -119,3 +135,5 @@ Setup constants live in `read_and_process.jl`; `VOLTS_PER_ADC` and
 | `TIME_PER_SAMPLE` | 2 ns | sampling period |
 | `TIME_PER_CLOCK_CYCLE` | 8 ns | trigger-timestamp clock (125 MHz) |
 | `R_LOAD` | 50 Ω | load resistor (for charge integral) |
+
+`VOLTS_PER_ADC` and `TIME_PER_SAMPLE` are occasionally useful for converting raw quantities into physical units, and are thus exported.
