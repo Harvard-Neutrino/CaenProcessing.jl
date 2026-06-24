@@ -99,28 +99,39 @@ function instantiate_data_vecs( n_samples )
     return w, event_id, trigger_time, num_overflows
 end
 
+# channel number parsed from a `run.dat-chN` filename (-1 if none).
+_channel_from_filename( f ) =
+    (m = match( _CH_FILE_REGEX, f )) === nothing ? -1 : parse( Int, m.captures[1] )
+
 """
-    read_waveforms( f_dat; n_evts=Inf )
+    read_waveforms( f_dat, n_evts=Inf ) -> Waveforms
+
+Read the raw waveforms from a single `run.dat-chN` file (no pulse processing),
+along with each event's `event_id` and `trigger_time`. See [`Waveforms`](@ref).
 """
 function read_waveforms( f_dat, n_evts=Inf )
 
     n_samples = get_n_event_samples( f_dat )
+    n_evts = ( isinf(n_evts) ) ? calc_n_evts(f_dat, n_samples) : convert(Int, n_evts)
 
-    n_evts = ( isinf(n_evts) ) ? calc_n_evts(f_dat, n_samples) : n_evts 
-    waveform_array = Matrix{T_DATA}(undef, n_samples, n_evts )
+    samples = Matrix{T_DATA}(undef, n_samples, n_evts)
+    event_id = Vector{Int32}(undef, n_evts)
+    trigger_ticks = Vector{Float64}(undef, n_evts)
 
-    # instantiate for while loop
-    event_id, trigger_time, num_overflows = instantiate_data_vecs( n_samples )[2:end]
+    # scratch buffers reused across events
+    ev, tt, num_overflows = instantiate_data_vecs( n_samples )[2:end]
 
-    open( f_dat, "r" ) do io     
-    # read + process data evt-by-evt from file   
-        for i in axes( waveform_array, 2 )
-            read_next_trigger!( io, 
-                (@view waveform_array[:, i]), 
-                event_id, trigger_time, num_overflows )
+    open( f_dat, "r" ) do io
+    # read data evt-by-evt from file
+        for i in 1:n_evts
+            read_next_trigger!( io, (@view samples[:, i]), ev, tt, num_overflows )
+            event_id[i] = ev[1]
+            trigger_ticks[i] = tt[1]
         end
     end
-    return waveform_array
+
+    trigger_time = trigger_ticks .* TIME_PER_CLOCK_CYCLE
+    return Waveforms( samples, _channel_from_filename(f_dat), event_id, trigger_time )
 end
 
 
@@ -245,80 +256,87 @@ function process_waveform( waveform;
 end
 
 
-"""
-    process_data( f_dat; n_evts=Inf )
-
-Read a .dat file named `f_dat` from the Caen digitizer to a Table object.
-"""
-function process_data( f_dat; n_evts=Inf, kwargs... )
-
-    n_samples = get_n_event_samples( f_dat )
-    n_evts = convert( Int, min( n_evts, calc_n_evts(f_dat, n_samples) ) )
-
-    # instantiate for while loop
-    waveform =  Vector{float(T_DATA)}(undef, n_samples)
-    w, event_id, trigger_time, num_overflows = instantiate_data_vecs( n_samples )
-
-    # properties to save 
+# Allocate the empty per-event table (one row per event).
+function _blank_event_table( n_evts )
     blank_col(T::Type) = Vector{T}(undef, n_evts)
     blank_col(T::Quantity) = StructArray{T}( undef, n_evts )
     blank_col(T::Type, u::FreeUnits ) = blank_col( typeof(one(T) * u) )
-    t = StructArray(
+    StructArray(
         event_id = blank_col( Int32 ),
         trigger_time = blank_col( Float64, s ),
         is_saturated = blank_col( Bool ),
-        
+
         baseline = blank_col( Float64, mV ),
         baseline_ADC = blank_col( Float64 ),
         baseline_rms = blank_col( Float64, mV ),
         baseline_rms_ADC = blank_col( Float64 ),
 
         waveform_max_time = blank_col( Int32, ns ),
-        # waveform_max_time_raw = blank_col( Int32 ),
         waveform_max = blank_col( Float64, mV ),
         peak_ADC = blank_col( Float64 ),
-        
+
         event_time_CFD = blank_col( Int32, ns ),
-        # event_time_CFD_raw = blank_col( Int32 ),
 
         charge_integral = blank_col( Float64, pC),
     )
+end
 
-    open( f_dat, "r" ) do io     
-    # read + process data evt-by-evt from file   
+# Store one event's results into row `i` of the table `t`.
+function _store_event!( t, i, event_id, trigger_time, calcs )
+    t.event_id[i] = event_id
+    t.trigger_time[i] = trigger_time
+    t.is_saturated[i] = calcs.is_saturated
+    t.baseline[i] = calcs.baseline
+    t.baseline_ADC[i] = calcs.baseline_ADC
+    t.baseline_rms[i] = calcs.baseline_rms
+    t.baseline_rms_ADC[i] = calcs.baseline_rms_ADC
+    t.waveform_max[i] = calcs.waveform_max
+    t.peak_ADC[i] = calcs.peak_ADC
+    t.waveform_max_time[i] = calcs.waveform_max_time
+    t.event_time_CFD[i] = calcs.event_time_CFD
+    t.charge_integral[i] = calcs.charge_integral
+    return t
+end
+
+"""
+    process_data( f_dat::AbstractString; n_evts=Inf, kwargs... )
+
+Read a `.dat` file named `f_dat` from the CAEN digitizer into a per-event table.
+Processing keyword arguments are forwarded to [`process_waveform`](@ref).
+"""
+function process_data( f_dat::AbstractString; n_evts=Inf, kwargs... )
+
+    n_samples = get_n_event_samples( f_dat )
+    n_evts = convert( Int, min( n_evts, calc_n_evts(f_dat, n_samples) ) )
+
+    w, event_id, trigger_time, num_overflows = instantiate_data_vecs( n_samples )
+    t = _blank_event_table( n_evts )
+
+    open( f_dat, "r" ) do io
         for i in 1:n_evts
-
-            not_done = read_next_trigger!( io, w, 
-                event_id, trigger_time, num_overflows )
-
-            # convert type for calculations
-            waveform .= w 
-
-            # calculations
-            calcs = process_waveform( waveform; kwargs... )
-
-            # copy to table
-            begin
-                t.event_id[i] = event_id[1]
-                t.trigger_time[i] = trigger_time[1] * TIME_PER_CLOCK_CYCLE
-
-                t.is_saturated[i] = calcs.is_saturated
-                t.baseline[i] = calcs.baseline
-                t.baseline_ADC[i] = calcs.baseline_ADC
-                t.baseline_rms[i] = calcs.baseline_rms
-                t.baseline_rms_ADC[i] = calcs.baseline_rms_ADC
-
-                t.waveform_max[i] = calcs.waveform_max
-                t.peak_ADC[i] = calcs.peak_ADC
-                t.waveform_max_time[i] = calcs.waveform_max_time
-                # t.waveform_max_time_raw[i] = calcs.waveform_max_time_raw
-
-                t.event_time_CFD[i]    = calcs.event_time_CFD
-                # t.event_time_CFD_raw[i] = calcs.event_time_CFD_raw
-                t.charge_integral[i] = calcs.charge_integral
-            end
+            read_next_trigger!( io, w, event_id, trigger_time, num_overflows )
+            calcs = process_waveform( w; kwargs... )
+            _store_event!( t, i, event_id[1], trigger_time[1] * TIME_PER_CLOCK_CYCLE, calcs )
         end
     end
 
+    return t
+end
+
+"""
+    process_data( w::Waveforms; kwargs... )
+
+Process already-loaded raw waveforms into a per-event table, in memory (no file
+read). Useful for re-deriving the table with different processing parameters; see
+[`reprocess`](@ref). Processing keyword arguments are forwarded to
+[`process_waveform`](@ref).
+"""
+function process_data( w::Waveforms; kwargs... )
+    n = length( w )
+    t = _blank_event_table( n )
+    for i in 1:n
+        calcs = process_waveform( (@view w.samples[:, i]); kwargs... )
+        _store_event!( t, i, w.event_id[i], w.trigger_time[i], calcs )
+    end
     return t
 end

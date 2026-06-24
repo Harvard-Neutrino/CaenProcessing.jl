@@ -20,11 +20,15 @@ const _CH_FILE_REGEX = r"ch(\d+)$"
 The result of reading a `caen-run` run directory (see [`read_run`](@ref)).
 
 Fields:
-- `config` : the parsed `run.toml` (a NamedTuple; see [`read_run_config`](@ref)).
-             Per-channel acquisition settings (e.g. `trigger_threshold`) live
-             here, under `config.channels[ch]`.
-- `data`   : `Dict{Int, table}` mapping each channel number to its processed
-             waveform table.
+- `config`    : the parsed `run.toml` (a NamedTuple; see [`read_run_config`](@ref)).
+                Per-channel acquisition settings (e.g. `trigger_threshold`) live
+                here, under `config.channels[ch]`.
+- `data`      : `Dict{Int, table}` mapping each channel number to its processed
+                waveform table.
+- `waveforms` : `Dict{Int, Waveforms}` of the raw waveforms per channel, or
+                `nothing` if they were not loaded (see `read_run`'s
+                `load_waveforms` keyword).
+- `dir`       : the run directory this was read from (used by [`reprocess`](@ref)).
 
 Channel data tables are accessible via `run.data[ch]` or the shorthand `run[ch]`;
 `keys(run)` / `haskey(run, ch)` work as well.
@@ -32,6 +36,8 @@ Channel data tables are accessible via `run.data[ch]` or the shorthand `run[ch]`
 struct Run
     config
     data
+    waveforms
+    dir
 end
 
 Base.getindex( r::Run, ch::Integer ) = r.data[ch]
@@ -80,9 +86,18 @@ function Base.show( io::IO, ::MIME"text/plain", r::Run )
 
     # ── .data branch: one line per channel (event counts only) ──
     chans = sort( collect(keys(r.data)) )
-    print( io, "└─ .data" )
+    has_wf = r.waveforms !== nothing
+    print( io, has_wf ? "├─ .data" : "└─ .data" )
     for ch in chans
-        print( io, "\n     ch", ch, " → ", length(r.data[ch]), " events" )
+        print( io, "\n", has_wf ? "│    " : "     ", "ch", ch, " → ", length(r.data[ch]), " events" )
+    end
+
+    # ── .waveforms branch: present only when raw waveforms were loaded ──
+    if has_wf
+        print( io, "\n└─ .waveforms" )
+        for ch in sort( collect(keys(r.waveforms)) )
+            print( io, "\n     ch", ch, " → ", length(r.waveforms[ch]), " waveforms" )
+        end
     end
 end
 
@@ -139,22 +154,51 @@ each channel number to the table returned by [`process_data`](@ref).
 
 The data files are taken from `config.files.data` when present, and otherwise
 discovered by globbing `run.dat-ch*` in `dir`.
+
+Set `load_waveforms=true` to also load each channel's raw waveforms into the
+returned `Run`'s `waveforms` field (a `Dict{Int, Waveforms}`); by default they
+are not read and that field is `nothing`.
 """
-function read_run( dir; n_evts=Inf, kwargs... )
+function read_run( dir; n_evts=Inf, load_waveforms=false, kwargs... )
     config = read_run_config( dir )
 
     # prefer the authoritative file list in run.toml; fall back to globbing.
     data_files = _run_data_files( config, dir )
 
     data = Dict{Int, Any}()
+    waveforms = load_waveforms ? Dict{Int, Waveforms}() : nothing
     for fname in data_files
         m = match( _CH_FILE_REGEX, fname )
         m === nothing && continue
         ch = parse( Int, m.captures[1] )
-        data[ch] = process_data( joinpath(dir, fname); n_evts=n_evts, kwargs... )
+        path = joinpath( dir, fname )
+        data[ch] = process_data( path; n_evts=n_evts, kwargs... )
+        load_waveforms && ( waveforms[ch] = read_waveforms( path, n_evts ) )
     end
 
-    return Run( config, data )
+    return Run( config, data, waveforms, dir )
+end
+
+"""
+    reprocess( run::Run; kwargs... ) -> Run
+
+Re-derive a run's per-channel event tables with new processing parameters (e.g.
+`reprocess(run; charge_len=300)`), returning a new [`Run`](@ref).
+
+If the run's raw `waveforms` were loaded (`read_run(...; load_waveforms=true)`),
+they are re-processed in memory with no file read; otherwise the data files are
+re-read from the run's `dir`.
+"""
+function reprocess( run::Run; kwargs... )
+    if run.waveforms !== nothing
+        data = Dict{Int, Any}( ch => process_data( w; kwargs... )
+                               for (ch, w) in run.waveforms )
+        return Run( run.config, data, run.waveforms, run.dir )
+    elseif run.dir !== nothing
+        return read_run( run.dir; kwargs... )
+    else
+        error( "cannot reprocess: this Run has neither loaded waveforms nor a source `dir`" )
+    end
 end
 
 """
