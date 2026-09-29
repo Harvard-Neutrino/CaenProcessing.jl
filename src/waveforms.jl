@@ -11,7 +11,7 @@
 
 One event's raw waveform: a 0-based, unit-carrying `sample_times` axis
 (`0, dt, 2dt, …`) paired with its raw ADC `samples`, plus provenance (`channel`,
-`event_id`, `trigger_time`). `samples` is a view into the parent `Waveforms`, so no
+`event_id`, `trigger_time`) and the input dynamic range `range_Vpp`. `samples` is a view into the parent `Waveforms`, so no
 data is copied; use [`volts`](@ref) for the samples in physical units.
 """
 struct Waveform{T<:AbstractVector, V<:AbstractVector, Q}
@@ -20,13 +20,15 @@ struct Waveform{T<:AbstractVector, V<:AbstractVector, Q}
     channel      :: Int
     event_id     :: Int32
     trigger_time :: Q
+    range_Vpp    :: Float64
 end
 
 """
     Waveforms
 
 Raw waveforms from one channel: the ADC matrix `samples` (`n_samples × n_evts`)
-together with per-event `event_id` and `trigger_time`.
+together with per-event `event_id` and `trigger_time`, and the input dynamic
+range `range_Vpp` (2 or 0.5 Vpp) the data were taken at.
 
 Index with `w[i]` to get the i-th event as a [`Waveform`](@ref). `length(w)` is the
 number of events, `nsamples(w)` the samples per event, and `sample_times(w)` the
@@ -37,6 +39,7 @@ struct Waveforms{Q<:AbstractVector}
     channel      :: Int
     event_id     :: Vector{Int32}
     trigger_time :: Q               # per-event, with units
+    range_Vpp    :: Float64         # input dynamic range, Vpp
 end
 
 Base.length(w::Waveforms)  = size(w.samples, 2)
@@ -50,7 +53,7 @@ The shared sample-time axis, 0-based and unit-carrying: `0, dt, 2dt, …`.
 sample_times(w::Waveforms) = (0:nsamples(w) - 1) .* TIME_PER_SAMPLE
 
 function Base.getindex(w::Waveforms, i::Integer)
-    Waveform(sample_times(w), (@view w.samples[:, i]), w.channel, w.event_id[i], w.trigger_time[i])
+    Waveform(sample_times(w), (@view w.samples[:, i]), w.channel, w.event_id[i], w.trigger_time[i], w.range_Vpp)
 end
 
 Base.length(wf::Waveform) = length(wf.samples)
@@ -58,9 +61,11 @@ Base.length(wf::Waveform) = length(wf.samples)
 """
     volts(wf::Waveform)
 
-The waveform's ADC samples converted to physical units (volts).
+The waveform's ADC samples converted to physical units (volts), at the input
+range the data were taken at.
 """
-volts(wf::Waveform) = wf.samples .* VOLTS_PER_ADC
+volts(wf::Waveform) = wf.samples .* volts_per_ADC( wf.range_Vpp )
+volts_per_ADC(w::Union{Waveform, Waveforms}) = volts_per_ADC( w.range_Vpp )
 
 function Base.show(io::IO, w::Waveforms)
     print(io, "Waveforms(ch", w.channel, ", ", length(w), " events × ",
