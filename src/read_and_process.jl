@@ -152,8 +152,9 @@ end
 begin
 # calculation functions 
 
+    # clipped at either rail: 0 for negative pulses, 2^ADC_BITS - 1 for positive
     function check_saturation( waveform )
-        return any( waveform .== 0 )
+        return any( x -> x == 0 || x == 2^ADC_BITS - 1, waveform )
     end
 
     function calc_baseline( waveform, xmin, xmax )
