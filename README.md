@@ -54,10 +54,11 @@ run[0]                # channel 0's table  (shorthand for run.data[0])
 physical units and raw ADC counts. The `_ADC` columns are exactly the
 pre-scaling values, so
 ```
-physical == x_ADC * VOLTS_PER_ADC
+physical == x_ADC * volts_per_ADC(range_Vpp)
 ```
 
-holds for every `_ADC` pair (e.g. `baseline == baseline_ADC * VOLTS_PER_ADC`).
+holds for every `_ADC` pair (e.g. `baseline == baseline_ADC * volts_per_ADC(range_Vpp)`),
+where `range_Vpp` is the digitizer's input dynamic range (see [Input dynamic range](#input-dynamic-range)).
 
 `peak_ADC` is deliberately *separate* from this rule: it is the literal ADC value
 at the peak with the pedestal left in, so unlike `waveform_max` it is **not** just
@@ -119,7 +120,8 @@ A `Waveform` bundles one event's samples with its time axis and provenance:
 | `wf.sample_times` | sample times (ns), 0-based |
 | `wf.samples` | raw ADC samples (a view into the parent matrix) |
 | `wf.channel` / `wf.event_id` / `wf.trigger_time` | provenance |
-| `volts(wf)` | the samples converted to volts |
+| `wf.range_Vpp` | input dynamic range the data were taken at (Vpp) |
+| `volts(wf)` | the samples converted to volts, at that range |
 
 ## `read_run` and the `Run` object:
 
@@ -147,6 +149,19 @@ The `Run` object has the following properties and accessors:
 | `run.waveforms` | `Dict{Int, Waveforms}` of raw waveforms, or `nothing` if not loaded |
 | `run.dir` | the run directory this was read from |
 
+### Input dynamic range
+
+The x725/x730 inputs run at either 2 Vpp (the default) or 0.5 Vpp, which changes
+the ADC → volts conversion by a factor of 4. `caen-run --range` records the
+setting in `run.toml` as `acquisition.input_range_Vpp`, and `read_run` applies the
+right conversion to every voltage and charge. `input_range_Vpp(run.config[, ch])`
+returns the range in use. Runs that don't record a range predate the flag and
+were taken at 2 Vpp.
+
+To override the recorded range (e.g. for a run with wrong metadata), pass
+`read_run(dir; range_Vpp=0.5)`. When calling `process_data` or `read_waveforms`
+on a data file directly, pass `range_Vpp` yourself: they default to 2 Vpp.
+
 ### Loading waveforms 
 
 By default the raw waveforms are not loaded. Pass `load_waveforms=true` to also load them into `run.waveforms`; they then appear as a `.waveforms` branch in the printout.
@@ -168,9 +183,9 @@ CaenProcessing.jl relies on some fixed properties of the Caen digitizer:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `VOLTS_PER_ADC` | 2 V / 2¹⁴ | ADC count → volts |
+| `VOLTS_PER_ADC` | 2 V / 2¹⁴ | ADC count → volts, at the default 2 Vpp input range |
 | `TIME_PER_SAMPLE` | 2 ns | sampling period |
 | `TIME_PER_CLOCK_CYCLE` | 8 ns | trigger-timestamp clock (125 MHz) |
 | `R_LOAD` | 50 Ω | load resistor (for charge integral) |
 
-`VOLTS_PER_ADC` and `TIME_PER_SAMPLE` are occasionally useful for converting raw quantities into physical units, and are thus exported.
+`VOLTS_PER_ADC` and `TIME_PER_SAMPLE` are occasionally useful for converting raw quantities into physical units, and are thus exported. For data at another input range use `volts_per_ADC(range_Vpp)` (e.g. `volts_per_ADC(0.5)` = 0.5 V / 2¹⁴), or `volts_per_ADC(w)` for a `Waveforms`/`Waveform`.

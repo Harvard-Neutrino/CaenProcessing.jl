@@ -71,6 +71,7 @@ function Base.show( io::IO, ::MIME"text/plain", r::Run )
         rt = _get( acq, :run_time_s, nothing )
         rt !== nothing && push!( cfg_lines, "time  = $rt s" )
     end
+    push!( cfg_lines, "range = $(input_range_Vpp(c)) Vpp" )
     notes = _get( c, :notes, nothing )
     (notes !== nothing && !isempty(notes)) && push!( cfg_lines, "notes = $notes" )
     # per-channel trigger thresholds are config, not data
@@ -144,6 +145,29 @@ function read_run_config( path )
     return channels === nothing ? nt : merge(nt, (; channels))
 end
 
+# runs from before caen-run's --range flag don't record the input range; the
+# digitizer was always at its 2 Vpp default then
+const _DEFAULT_RANGE_VPP = 2.0
+
+"""
+    input_range_Vpp(config[, ch]) -> Float64
+
+The input dynamic range (2 or 0.5 Vpp) a run was taken at, from its parsed
+`run.toml` (see [`read_run_config`](@ref)). A per-channel
+`channels[ch].input_range_Vpp` takes precedence over the run-wide
+`acquisition.input_range_Vpp`; runs that record neither were taken at 2 Vpp.
+"""
+function input_range_Vpp( config, ch=nothing )
+    chans = _get( config, :channels, nothing )
+    if ch !== nothing && chans !== nothing && haskey( chans, ch )
+        r = _get( chans[ch], :input_range_Vpp, nothing )
+        r !== nothing && return Float64( r )
+    end
+    acq = _get( config, :acquisition, nothing )
+    r = acq === nothing ? nothing : _get( acq, :input_range_Vpp, nothing )
+    return r === nothing ? _DEFAULT_RANGE_VPP : Float64( r )
+end
+
 """
     read_run(dir; n_evts=Inf) -> Run
 
@@ -158,8 +182,12 @@ discovered by globbing `run.dat-ch*` in `dir`.
 Set `load_waveforms=true` to also load each channel's raw waveforms into the
 returned `Run`'s `waveforms` field (a `Dict{Int, Waveforms}`); by default they
 are not read and that field is `nothing`.
+
+The ADC -> volts conversion follows each channel's input dynamic range as
+recorded in `run.toml` (see [`input_range_Vpp`](@ref)). Pass `range_Vpp` to
+override it for every channel, e.g. for a run whose metadata is wrong.
 """
-function read_run( dir; n_evts=Inf, load_waveforms=false, kwargs... )
+function read_run( dir; n_evts=Inf, load_waveforms=false, range_Vpp=nothing, kwargs... )
     config = read_run_config( dir )
 
     # prefer the authoritative file list in run.toml; fall back to globbing.
@@ -172,8 +200,9 @@ function read_run( dir; n_evts=Inf, load_waveforms=false, kwargs... )
         m === nothing && continue
         ch = parse( Int, m.captures[1] )
         path = joinpath( dir, fname )
-        data[ch] = process_data( path; n_evts=n_evts, kwargs... )
-        load_waveforms && ( waveforms[ch] = read_waveforms( path, n_evts ) )
+        rng = range_Vpp === nothing ? input_range_Vpp( config, ch ) : range_Vpp
+        data[ch] = process_data( path; n_evts=n_evts, range_Vpp=rng, kwargs... )
+        load_waveforms && ( waveforms[ch] = read_waveforms( path, n_evts; range_Vpp=rng ) )
     end
 
     return Run( config, data, waveforms, dir )
@@ -187,7 +216,8 @@ Re-derive a run's per-channel event tables with new processing parameters (e.g.
 
 If the run's raw `waveforms` were loaded (`read_run(...; load_waveforms=true)`),
 they are re-processed in memory with no file read; otherwise the data files are
-re-read from the run's `dir`.
+re-read from the run's `dir`. Either way the run's input range is kept unless
+`range_Vpp` is passed.
 """
 function reprocess( run::Run; kwargs... )
     if run.waveforms !== nothing

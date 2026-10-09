@@ -17,8 +17,8 @@ include("runs.jl")
 export ns, mV, C, pC
 export read_waveforms, process_data
 export Waveforms, Waveform, sample_times, nsamples, volts
-export read_run, read_run_config, Run, reprocess
+export read_run, read_run_config, Run, reprocess, input_range_Vpp
 
-export VOLTS_PER_ADC, TIME_PER_SAMPLE
+export VOLTS_PER_ADC, volts_per_ADC, TIME_PER_SAMPLE
 
 end

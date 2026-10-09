@@ -1,6 +1,18 @@
 
 # properties of digitizer setup
-const VOLTS_PER_ADC = 2u"V" / 2^14
+const ADC_BITS = 14
+
+"""
+    volts_per_ADC( range_Vpp=2 )
+
+Volts per ADC count for an input dynamic range of `range_Vpp` volts
+peak-to-peak. The x725/x730 digitizers support 2 Vpp (the default) and 0.5 Vpp.
+"""
+volts_per_ADC( range_Vpp::Real=2 ) = range_Vpp * u"V" / 2^ADC_BITS
+
+# ADC count -> volts at the default 2 Vpp input range. Use `volts_per_ADC` for
+# data taken at another range.
+const VOLTS_PER_ADC = volts_per_ADC( 2 )
 const TIME_PER_SAMPLE = 2u"ns"
 const TIME_PER_CLOCK_CYCLE = 8ns #125 mHz clock cycle
 const R_LOAD = 50u"Ω" # load resistor
@@ -104,12 +116,14 @@ _channel_from_filename( f ) =
     (m = match( _CH_FILE_REGEX, f )) === nothing ? -1 : parse( Int, m.captures[1] )
 
 """
-    read_waveforms( f_dat, n_evts=Inf ) -> Waveforms
+    read_waveforms( f_dat, n_evts=Inf; range_Vpp=2 ) -> Waveforms
 
 Read the raw waveforms from a single `run.dat-chN` file (no pulse processing),
-along with each event's `event_id` and `trigger_time`. See [`Waveforms`](@ref).
+along with each event's `event_id` and `trigger_time`. `range_Vpp` is the input
+dynamic range the data were taken at; it is stored with the waveforms and sets
+their ADC -> volts conversion. See [`Waveforms`](@ref).
 """
-function read_waveforms( f_dat, n_evts=Inf )
+function read_waveforms( f_dat, n_evts=Inf; range_Vpp=2 )
 
     n_samples = get_n_event_samples( f_dat )
     n_evts = ( isinf(n_evts) ) ? calc_n_evts(f_dat, n_samples) : convert(Int, n_evts)
@@ -131,15 +145,16 @@ function read_waveforms( f_dat, n_evts=Inf )
     end
 
     trigger_time = trigger_ticks .* TIME_PER_CLOCK_CYCLE
-    return Waveforms( samples, _channel_from_filename(f_dat), event_id, trigger_time )
+    return Waveforms( samples, _channel_from_filename(f_dat), event_id, trigger_time, Float64(range_Vpp) )
 end
 
 
 begin
 # calculation functions 
 
+    # clipped at either rail: 0 for negative pulses, 2^ADC_BITS - 1 for positive
     function check_saturation( waveform )
-        return any( waveform .== 0 )
+        return any( x -> x == 0 || x == 2^ADC_BITS - 1, waveform )
     end
 
     function calc_baseline( waveform, xmin, xmax )
@@ -191,10 +206,13 @@ Keyword arguments (lengths in samples):
 - `charge_pre`   : begin the charge integral this many samples before the onset
 - `charge_len`   : length of the charge-integral window
 - `polarity`     : `"POSITIVE"` or `"NEGATIVE"` pulse direction
+- `range_Vpp`    : input dynamic range in Vpp (2 or 0.5), sets the ADC -> volts conversion
 """
 function process_waveform( waveform;
         cfd_fraction=0.2, skip_initial=16, base_guard=8, base_width=40,
-        charge_pre=8, charge_len=180, polarity="POSITIVE" )
+        charge_pre=8, charge_len=180, polarity="POSITIVE", range_Vpp=2 )
+
+    V_per_ADC = volts_per_ADC( range_Vpp )
 
     n = length( waveform )
     sgn = startswith( uppercase(string(polarity)), "POS" ) ? 1.0 : -1.0
@@ -236,22 +254,22 @@ function process_waveform( waveform;
 
         # physical-unit values, with their ADC-unit counterparts (the `_ADC`
         # columns) saved alongside for convenience; the invariant
-        # `physical == x_ADC * VOLTS_PER_ADC` holds for each such pair.
+        # `physical == x_ADC * volts_per_ADC(range_Vpp)` holds for each such pair.
         # `peak_ADC` is deliberately separate: it is the literal ADC reading at
         # the peak with the pedestal NOT subtracted, so (unlike waveform_max) it
         # is not just waveform_max expressed in ADC units.
-        baseline = sgn * baseline * VOLTS_PER_ADC,
+        baseline = sgn * baseline * V_per_ADC,
         baseline_ADC = sgn * baseline,
-        baseline_rms = baseline_rms * VOLTS_PER_ADC,
+        baseline_rms = baseline_rms * V_per_ADC,
         baseline_rms_ADC = baseline_rms,
 
-        waveform_max = max_w * VOLTS_PER_ADC,
+        waveform_max = max_w * V_per_ADC,
         peak_ADC = sgn * ( max_w + baseline ),
         waveform_max_time = ( k - firstindex(s) ) * TIME_PER_SAMPLE,
 
         event_time_CFD = ( onset - firstindex(s) ) * TIME_PER_SAMPLE,
 
-        charge_integral = charge_integral * VOLTS_PER_ADC / R_LOAD * TIME_PER_SAMPLE,
+        charge_integral = charge_integral * V_per_ADC / R_LOAD * TIME_PER_SAMPLE,
     )
 end
 
@@ -302,7 +320,9 @@ end
     process_data( f_dat::AbstractString; n_evts=Inf, kwargs... )
 
 Read a `.dat` file named `f_dat` from the CAEN digitizer into a per-event table.
-Processing keyword arguments are forwarded to [`process_waveform`](@ref).
+Processing keyword arguments are forwarded to [`process_waveform`](@ref); pass
+`range_Vpp=0.5` for data taken at the 0.5 Vpp input range ([`read_run`](@ref)
+does this automatically from `run.toml`).
 """
 function process_data( f_dat::AbstractString; n_evts=Inf, kwargs... )
 
@@ -329,13 +349,13 @@ end
 Process already-loaded raw waveforms into a per-event table, in memory (no file
 read). Useful for re-deriving the table with different processing parameters; see
 [`reprocess`](@ref). Processing keyword arguments are forwarded to
-[`process_waveform`](@ref).
+[`process_waveform`](@ref). The input range defaults to the one stored with `w`.
 """
-function process_data( w::Waveforms; kwargs... )
+function process_data( w::Waveforms; range_Vpp=w.range_Vpp, kwargs... )
     n = length( w )
     t = _blank_event_table( n )
     for i in 1:n
-        calcs = process_waveform( (@view w.samples[:, i]); kwargs... )
+        calcs = process_waveform( (@view w.samples[:, i]); range_Vpp=range_Vpp, kwargs... )
         _store_event!( t, i, w.event_id[i], w.trigger_time[i], calcs )
     end
     return t
